@@ -342,11 +342,11 @@ export default function Portfolio() {
     setDelId(null);
 
     if (type === "work") {
-      const { error } = await supabase.from("works").delete().eq("id", id);
-      if (!error) setWorks(prev => prev.filter(w => w.id !== id));
+      setWorks(prev => prev.filter(w => w.id !== id));
+      await supabase.from("works").delete().eq("id", id);
     } else {
-      const { error } = await supabase.from("contribs").delete().eq("id", id);
-      if (!error) setContribs(prev => prev.filter(c => c.id !== id));
+      setContribs(prev => prev.filter(c => c.id !== id));
+      await supabase.from("contribs").delete().eq("id", id);
     }
   };
 
