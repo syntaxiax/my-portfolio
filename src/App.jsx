@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import profileImg from './profile.png';
 import { supabase } from './supabase';
 
 const ADMIN_PASS = "syntaxia_dev";
+const CUSTOMER_PASS = "syntaxia_reviews"; // ← change this to your preferred customer password
 
 const CATS = [
   { id: "all", label: "All" },
@@ -198,6 +199,43 @@ const injectStyles = () => {
     .add-work-btn { transition: all 0.15s; }
     .add-work-btn:hover { transform: scale(1.03); opacity: 0.9; }
 
+    /* ── Review carousel ───────────────────────────────── */
+    .rev-arrow {
+      width: 42px; height: 42px; border-radius: 50%;
+      border: 1px solid ${C.border}; background: ${C.card};
+      color: ${C.muted}; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; flex-shrink: 0; font-size: 20px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .rev-arrow:hover { background: ${C.card2}; border-color: ${C.muted}; color: ${C.white}; }
+    .rev-arrow:disabled { opacity: 0.3; cursor: default; }
+
+    .rev-card {
+      background: ${C.card}; border: 1px solid ${C.border};
+      border-radius: 14px; padding: 1.5rem;
+      animation: slideIn 0.25s ease;
+    }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+
+    .star-btn-pick {
+      background: none; border: none; cursor: pointer; font-size: 26px;
+      padding: 0; transition: transform 0.1s; line-height: 1;
+    }
+    .star-btn-pick:hover { transform: scale(1.25); }
+
+    .rev-dot { width: 6px; height: 6px; border-radius: 50%; background: ${C.border}; transition: background 0.2s; }
+    .rev-dot.active { background: ${C.blurple}; }
+
+    .customer-login-btn {
+      background: none; border: 1px solid ${C.border}; color: ${C.muted};
+      padding: 7px 14px; border-radius: 8px; cursor: pointer;
+      font-size: 12px; font-family: 'Space Mono', monospace;
+      display: flex; align-items: center; gap: 6px;
+      transition: all 0.15s;
+    }
+    .customer-login-btn:hover { border-color: ${C.muted}; color: ${C.white}; }
+    .customer-login-btn.logged-in { border-color: #22c55e44; color: #22c55e; background: #22c55e11; }
+
     @keyframes fadeInUp {
       from { opacity: 0; transform: translateY(24px); }
       to { opacity: 1; transform: translateY(0); }
@@ -207,11 +245,28 @@ const injectStyles = () => {
   document.head.appendChild(s);
 };
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const renderStars = (rating, size = 16) =>
+  Array.from({ length: 5 }, (_, i) => (
+    <span key={i} style={{ color: i < rating ? "#f59e0b" : C.border, fontSize: size }}>★</span>
+  ));
+
+const avgRating = (reviews) => {
+  if (!reviews.length) return 0;
+  return (reviews.reduce((a, r) => a + r.rating, 0) / reviews.length).toFixed(1);
+};
+
+const formatDate = (ts) =>
+  new Date(ts).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function Portfolio() {
   const [works, setWorks] = useState([]);
   const [contribs, setContribs] = useState([]);
+  const [reviews, setReviews] = useState([]);
   const [filter, setFilter] = useState("all");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isCustomer, setIsCustomer] = useState(false);
   const [modal, setModal] = useState(null);
   const [activeWork, setActiveWork] = useState(null);
   const [delId, setDelId] = useState(null);
@@ -220,12 +275,18 @@ export default function Portfolio() {
   const [pwErr, setPwErr] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [revIdx, setRevIdx] = useState(0);
 
   const [form, setForm] = useState({ title: "", category: "lua", desc: "", imageUrl: "", videoUrl: "", tags: "" });
   const [contribForm, setContribForm] = useState({ title: "", type: "discord", desc: "", linkUrl: "", imageUrl: "", iconUrl: "" });
+  const [revForm, setRevForm] = useState({ name: "", discordUser: "", rating: 0, review: "" });
+  const [discordPreview, setDiscordPreview] = useState(null);
+  const [fetchingDiscord, setFetchingDiscord] = useState(false);
 
   const [activeSection, setActiveSection] = useState("home");
   const [scrolled, setScrolled] = useState(false);
+
+  const discordTimeout = useRef(null);
 
   useEffect(() => {
     injectStyles();
@@ -234,7 +295,7 @@ export default function Portfolio() {
     const handleScroll = () => setScrolled(window.scrollY > 40);
     window.addEventListener("scroll", handleScroll, { passive: true });
 
-    const sections = ["home", "about", "skills", "works", "contributions", "pricing", "contact"];
+    const sections = ["home", "about", "skills", "works", "contributions", "reviews", "pricing", "contact"];
     const obs = new IntersectionObserver(
       (entries) => { entries.forEach(e => { if (e.isIntersecting) setActiveSection(e.target.id); }); },
       { threshold: 0.4 }
@@ -247,12 +308,14 @@ export default function Portfolio() {
   // ── Load from Supabase ──────────────────────────────────────────────────
   const loadData = async () => {
     try {
-      const [{ data: worksData }, { data: contribsData }] = await Promise.all([
+      const [{ data: worksData }, { data: contribsData }, { data: reviewsData }] = await Promise.all([
         supabase.from("works").select("*").order("created_at", { ascending: false }),
         supabase.from("contribs").select("*").order("created_at", { ascending: false }),
+        supabase.from("reviews").select("*").order("created_at", { ascending: false }),
       ]);
       if (worksData) setWorks(worksData);
       if (contribsData) setContribs(contribsData);
+      if (reviewsData) setReviews(reviewsData);
     } catch (e) {
       console.error("Failed to load data:", e);
     }
@@ -265,12 +328,60 @@ export default function Portfolio() {
     else { setPwErr(true); }
   };
 
+  const handleCustomerLogin = () => {
+    if (pw === CUSTOMER_PASS) { setIsCustomer(true); setModal(null); setPw(""); setPwErr(false); }
+    else { setPwErr(true); }
+  };
+
   const handleFileUpload = (e, callback) => {
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => callback(event.target.result);
       reader.readAsDataURL(file);
+    }
+  };
+
+  // ── Discord username lookup (Lanyard / public API) ──────────────────────
+  const lookupDiscord = async (username) => {
+    if (!username.trim()) { setDiscordPreview(null); return; }
+    setFetchingDiscord(true);
+    try {
+      // Try Wumpus API (no auth needed, username search)
+      const res = await fetch(`https://discord.com/api/v9/users/@me`, { method: "GET" });
+      // Fallback: use a public lookup via open.discord.de or similar
+      // Since direct user search requires auth, we use the invite preview trick via a proxy
+      // We'll just store the username and skip avatar auto-fetch unless they provide a user ID
+      // Using an unofficial proxy that returns user info from username
+      const proxyRes = await fetch(`https://api.lanyard.rest/v1/users/search?q=${encodeURIComponent(username)}`);
+      if (proxyRes.ok) {
+        const data = await proxyRes.json();
+        if (data?.data?.length > 0) {
+          const u = data.data[0];
+          setDiscordPreview({
+            avatar: u.discord_user?.avatar
+              ? `https://cdn.discordapp.com/avatars/${u.discord_user.id}/${u.discord_user.avatar}.png?size=128`
+              : null,
+            displayName: u.discord_user?.username || username,
+          });
+        } else {
+          setDiscordPreview({ avatar: null, displayName: username });
+        }
+      } else {
+        setDiscordPreview({ avatar: null, displayName: username });
+      }
+    } catch {
+      setDiscordPreview({ avatar: null, displayName: username });
+    }
+    setFetchingDiscord(false);
+  };
+
+  const onDiscordChange = (val) => {
+    setRevForm(f => ({ ...f, discordUser: val }));
+    setDiscordPreview(null);
+    clearTimeout(discordTimeout.current);
+    if (val.trim().length > 1) {
+      discordTimeout.current = setTimeout(() => lookupDiscord(val), 800);
     }
   };
 
@@ -335,6 +446,31 @@ export default function Portfolio() {
     setSaving(false);
   };
 
+  // ── Add Review ──────────────────────────────────────────────────────────
+  const handleAddReview = async () => {
+    if (!revForm.name.trim() || revForm.rating < 1 || !revForm.review.trim()) return;
+    setSaving(true);
+
+    const review = {
+      name: revForm.name.trim(),
+      discord_username: revForm.discordUser.trim() || null,
+      discord_avatar: discordPreview?.avatar || null,
+      rating: revForm.rating,
+      review: revForm.review.trim(),
+    };
+
+    const { data, error } = await supabase.from("reviews").insert([review]).select().single();
+    if (!error && data) {
+      setReviews(prev => [data, ...prev]);
+      setRevIdx(0);
+    }
+    setRevForm({ name: "", discordUser: "", rating: 0, review: "" });
+    setDiscordPreview(null);
+    setModal(null);
+    setSaving(false);
+  };
+
+  // ── Delete ──────────────────────────────────────────────────────────────
   const handleDeleteItem = async () => {
     const id = delId;
     const type = delType;
@@ -344,15 +480,23 @@ export default function Portfolio() {
     if (type === "work") {
       setWorks(prev => prev.filter(w => w.id !== id));
       await supabase.from("works").delete().eq("id", id);
-    } else {
+    } else if (type === "contrib") {
       setContribs(prev => prev.filter(c => c.id !== id));
       await supabase.from("contribs").delete().eq("id", id);
+    } else if (type === "review") {
+      setReviews(prev => prev.filter(r => r.id !== id));
+      if (revIdx >= reviews.length - 1) setRevIdx(Math.max(0, reviews.length - 2));
+      await supabase.from("reviews").delete().eq("id", id);
     }
   };
 
   const filtered = filter === "all" ? works : works.filter(w => w.category === filter);
-  const navLinks = ["home", "about", "skills", "works", "contributions", "pricing", "contact"];
+  const navLinks = ["home", "about", "skills", "works", "contributions", "reviews", "pricing", "contact"];
   const scrollTo = (id) => { document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); };
+
+  // ── Current review ──────────────────────────────────────────────────────
+  const curReview = reviews[revIdx] || null;
+  const avg = avgRating(reviews);
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
@@ -514,6 +658,112 @@ export default function Portfolio() {
         )}
       </section>
 
+      {/* ── REVIEWS ─────────────────────────────────────────────────────── */}
+      <section id="reviews" style={{ padding: "6rem 2rem", maxWidth: 720, margin: "0 auto" }}>
+        {/* Header row */}
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", flexWrap: "wrap", gap: 16, marginBottom: "2rem" }}>
+          <div>
+            <Label>Testimonials</Label>
+            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: "clamp(1.4rem, 3vw, 2rem)", color: C.white, fontWeight: 700 }}>Client reviews</h2>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {isCustomer ? (
+              <button
+                className="customer-login-btn logged-in"
+                onClick={() => setModal("add_review")}
+              >
+                ✦ Leave a review
+              </button>
+            ) : (
+              <button
+                className="customer-login-btn"
+                onClick={() => { setPw(""); setPwErr(false); setModal("customer_login"); }}
+              >
+                🔒 Customer login
+              </button>
+            )}
+            {isAdmin && reviews.length > 0 && (
+              <button onClick={() => { setDelId(curReview?.id); setDelType("review"); setModal("del"); }} style={{ background: "#ef444411", color: "#ef4444", border: "1px solid #ef444433", padding: "7px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12 }}>🗑 Delete</button>
+            )}
+          </div>
+        </div>
+
+        {reviews.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "5rem 2rem", border: `1px dashed ${C.border}`, borderRadius: 12, color: C.dim }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>⭐</div>
+            <div style={{ fontFamily: "'Space Mono', monospace", fontSize: 13 }}>No reviews yet. Be the first!</div>
+          </div>
+        ) : (
+          <>
+            {/* Carousel row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <button
+                className="rev-arrow"
+                onClick={() => setRevIdx(i => Math.max(0, i - 1))}
+                disabled={revIdx === 0}
+                aria-label="Previous review"
+              >◀</button>
+
+              {curReview && (
+                <div key={curReview.id} className="rev-card" style={{ flex: 1 }}>
+                  {/* Reviewer info */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                    <div style={{ width: 46, height: 46, borderRadius: "50%", background: C.card2, border: `1px solid ${C.border}`, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {curReview.discord_avatar
+                        ? <img src={curReview.discord_avatar} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        : <span style={{ fontSize: 20, color: C.dim }}>👤</span>}
+                    </div>
+                    <div>
+                      <div style={{ fontFamily: "'Space Mono', monospace", fontSize: 14, color: C.white, fontWeight: 700 }}>{curReview.name}</div>
+                      {curReview.discord_username && (
+                        <div style={{ fontSize: 12, color: C.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ fontSize: 11 }}>💬</span> {curReview.discord_username}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ marginLeft: "auto" }}>
+                      {renderStars(curReview.rating, 18)}
+                    </div>
+                  </div>
+
+                  {/* Review text */}
+                  <p style={{ fontSize: 14, color: C.muted, lineHeight: 1.7, marginBottom: 12 }}>"{curReview.review}"</p>
+                  <div style={{ fontSize: 11, color: C.dim, fontFamily: "'Space Mono', monospace" }}>{formatDate(curReview.created_at)}</div>
+                </div>
+              )}
+
+              <button
+                className="rev-arrow"
+                onClick={() => setRevIdx(i => Math.min(reviews.length - 1, i + 1))}
+                disabled={revIdx === reviews.length - 1}
+                aria-label="Next review"
+              >▶</button>
+            </div>
+
+            {/* Center rating + dots */}
+            <div style={{ textAlign: "center", marginTop: "1.5rem" }}>
+              <div style={{ display: "flex", justifyContent: "center", gap: 2, marginBottom: 6 }}>
+                {renderStars(Math.round(avg), 22)}
+              </div>
+              <div style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: C.muted }}>
+                {avg} / 5 · {reviews.length} {reviews.length === 1 ? "review" : "reviews"}
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 14 }}>
+                {reviews.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setRevIdx(i)}
+                    className={`rev-dot${i === revIdx ? " active" : ""}`}
+                    style={{ border: "none", cursor: "pointer", padding: 0 }}
+                    aria-label={`Go to review ${i + 1}`}
+                  />
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
       {/* PRICING */}
       <section id="pricing" style={{ padding: "6rem 2rem", maxWidth: 1000, margin: "0 auto" }}>
         <Label>Pricing</Label>
@@ -569,13 +819,91 @@ export default function Portfolio() {
         Well ts the end of the website tsk tsk
       </footer>
 
-      {/* LOGIN MODAL */}
+      {/* ── MODALS ───────────────────────────────────────────────────────── */}
+
+      {/* ADMIN LOGIN */}
       {modal === "login" && (
         <Modal onClose={() => { setModal(null); setPw(""); setPwErr(false); }}>
           <h3 style={{ fontFamily: "'Space Mono', monospace", color: C.white, fontSize: 16, marginBottom: 20 }}>Admin Login</h3>
           <input type="password" placeholder="Password" value={pw} onChange={e => { setPw(e.target.value); setPwErr(false); }} onKeyDown={e => e.key === "Enter" && handleLogin()} style={inputStyle(pwErr)} autoFocus />
           {pwErr && <div style={{ color: "#f87171", fontSize: 12, marginTop: 6, fontFamily: "'Space Mono', monospace" }}>Wrong password</div>}
           <button onClick={handleLogin} style={{ ...btnStyle(C.white, C.bg), marginTop: 16, width: "100%" }}>Login</button>
+        </Modal>
+      )}
+
+      {/* CUSTOMER LOGIN */}
+      {modal === "customer_login" && (
+        <Modal onClose={() => { setModal(null); setPw(""); setPwErr(false); }}>
+          <h3 style={{ fontFamily: "'Space Mono', monospace", color: C.white, fontSize: 16, marginBottom: 6 }}>Customer login</h3>
+          <p style={{ fontSize: 13, color: C.muted, marginBottom: 18 }}>Only verified customers can leave reviews. Enter the password you received after your commission.</p>
+          <input type="password" placeholder="Customer password" value={pw} onChange={e => { setPw(e.target.value); setPwErr(false); }} onKeyDown={e => e.key === "Enter" && handleCustomerLogin()} style={inputStyle(pwErr)} autoFocus />
+          {pwErr && <div style={{ color: "#f87171", fontSize: 12, marginTop: 6, fontFamily: "'Space Mono', monospace" }}>Wrong password</div>}
+          <button onClick={handleCustomerLogin} style={{ ...btnStyle(C.blurple, "#fff"), marginTop: 16, width: "100%" }}>Login</button>
+        </Modal>
+      )}
+
+      {/* ADD REVIEW MODAL */}
+      {modal === "add_review" && (
+        <Modal onClose={() => setModal(null)} wide>
+          <h3 style={{ fontFamily: "'Space Mono', monospace", color: C.white, fontSize: 16, marginBottom: 6 }}>Leave a review</h3>
+          <p style={{ fontSize: 12, color: C.muted, marginBottom: 18 }}>Share your experience with Syntaxia's work.</p>
+
+          {/* Star picker */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: C.dim, fontFamily: "'Space Mono', monospace", marginBottom: 8 }}>Rating *</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[1, 2, 3, 4, 5].map(n => (
+                <button key={n} className="star-btn-pick" onClick={() => setRevForm(f => ({ ...f, rating: n }))} aria-label={`${n} star`}>
+                  <span style={{ color: n <= revForm.rating ? "#f59e0b" : C.border }}>★</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <input placeholder="Your name *" value={revForm.name} onChange={e => setRevForm(f => ({ ...f, name: e.target.value }))} style={inputStyle()} />
+
+            {/* Discord username with live preview */}
+            <div>
+              <input
+                placeholder="Discord username (optional)"
+                value={revForm.discordUser}
+                onChange={e => onDiscordChange(e.target.value)}
+                style={inputStyle()}
+              />
+              {fetchingDiscord && <div style={{ fontSize: 11, color: C.muted, marginTop: 5, fontFamily: "'Space Mono', monospace" }}>Looking up profile...</div>}
+              {discordPreview && !fetchingDiscord && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, padding: "8px 12px", background: C.card2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                  <div style={{ width: 32, height: 32, borderRadius: "50%", overflow: "hidden", background: C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {discordPreview.avatar
+                      ? <img src={discordPreview.avatar} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : <span style={{ fontSize: 16 }}>👤</span>}
+                  </div>
+                  <div style={{ fontSize: 13, color: C.text }}>{discordPreview.displayName}</div>
+                  <div style={{ fontSize: 11, color: "#22c55e", marginLeft: "auto" }}>✓ found</div>
+                </div>
+              )}
+            </div>
+
+            <textarea
+              placeholder="Your review... *"
+              rows={4}
+              value={revForm.review}
+              onChange={e => setRevForm(f => ({ ...f, review: e.target.value }))}
+              style={{ ...inputStyle(), resize: "vertical" }}
+            />
+
+            <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+              <button
+                onClick={handleAddReview}
+                disabled={saving || revForm.rating < 1 || !revForm.name.trim() || !revForm.review.trim()}
+                style={{ ...btnStyle(C.blurple, "#fff"), flex: 1, opacity: (saving || revForm.rating < 1 || !revForm.name.trim() || !revForm.review.trim()) ? 0.5 : 1 }}
+              >
+                {saving ? "Submitting..." : "Submit review"}
+              </button>
+              <button onClick={() => setModal(null)} style={{ ...btnStyle(C.card2, C.muted), flex: 1 }}>Cancel</button>
+            </div>
+          </div>
         </Modal>
       )}
 
@@ -667,6 +995,8 @@ export default function Portfolio() {
     </div>
   );
 }
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 function WorkCard({ work, isAdmin, onClick, onDelete }) {
   const catColor = { lua: "#5865f2", haxe: "#f97316", render: "#22c55e", sfx: "#a855f7" };
